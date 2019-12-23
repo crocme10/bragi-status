@@ -2,7 +2,15 @@ use chrono::prelude::*;
 //use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use url::{Host, ParseError, Url};
+// use url::{Host, ParseError, Url};
+use url::Url;
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateStatus {
+    Private,
+    Public,
+}
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -19,7 +27,7 @@ pub enum BragiStatus {
     ElasticsearchNotAvailable,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BragiInfo {
     pub label: String,
     pub url: String,
@@ -39,7 +47,7 @@ pub struct BragiStatusDetails {
     pub status: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ElasticsearchInfo {
     pub label: String,
     pub url: String,
@@ -51,14 +59,39 @@ pub struct ElasticsearchInfo {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ElasticsearchIndexInfo {
     pub label: String,
     pub place_type: String,
     pub coverage: String,
+    #[serde(skip_serializing_if = "is_public")]
+    pub private: PrivateStatus,
     pub date: DateTime<Utc>,
     pub count: u32,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ElasticsearchIndexInfoDetails {
+    pub health: String,
+    pub status: String,
+    pub index: String,
+    #[serde(skip)]
+    pub prim: u32,
+    #[serde(skip)]
+    pub rep: u32,
+    #[serde(rename = "docs.count")]
+    pub count: String,
+    #[serde(rename = "docs.deleted", skip)]
+    pub deleted: String,
+    #[serde(rename = "store.size", skip)]
+    pub size: String,
+    #[serde(rename = "pri.store.size", skip)]
+    pub pri_size: String,
+}
+
+fn is_public(status: &PrivateStatus) -> bool {
+    status == &PrivateStatus::Public
 }
 
 fn main() {
@@ -103,21 +136,10 @@ fn main() {
         std::process::exit(1);
     }
     update_bragi_info(&mut bragi, &bragi_status.unwrap());
-    println!("bragi {:?}", bragi);
+    bragi.elastic = bragi.elastic.map(update_elasticsearch_indices);
+    let b = serde_json::to_string(&bragi).unwrap();
+    println!("{}", b);
 }
-
-// fn check_backend_status(url: &str) -> ServerStatus {
-//     match reqwest::blocking::get(url) {
-//         Ok(resp) => {
-//             if resp.status().is_success() {
-//                 ServerStatus::Available
-//             } else {
-//                 ServerStatus::NotAvailable
-//             }
-//         }
-//         Err(_) => ServerStatus::NotAvailable,
-//     }
-// }
 
 fn check_bragi_status(url: &str) -> Option<BragiStatusDetails> {
     let status_url = format!("{}/status", url);
@@ -136,6 +158,7 @@ fn check_bragi_status(url: &str) -> Option<BragiStatusDetails> {
     }
 }
 
+// Extract the information from BragiStatusDetails, and store it in the mutable BragiInfo
 fn update_bragi_info(bragi: &mut BragiInfo, details: &BragiStatusDetails) {
     let elastic = Url::parse(&details.elasticsearch).unwrap();
     let elastic_url = match elastic.port() {
@@ -159,4 +182,57 @@ fn update_bragi_info(bragi: &mut BragiInfo, details: &BragiStatusDetails) {
         index_prefix: prefix,
         updated_at: Utc::now(),
     });
+}
+
+// We retrieve all indices in json format, then use serde to deserialize into a data structure,
+// and finally parse the label to extract the information.
+fn update_elasticsearch_indices(info: ElasticsearchInfo) -> ElasticsearchInfo {
+    let indices_url = format!("{}/_cat/indices?format=json", info.url);
+    let indices: Option<Vec<ElasticsearchIndexInfo>> = reqwest::blocking::get(&indices_url)
+        .ok()
+        .and_then(|resp| resp.json().ok())
+        .map(|is: Vec<ElasticsearchIndexInfoDetails>| {
+            is.iter()
+                .map(|i| {
+                    let zs: Vec<&str> = i.index.split('_').collect();
+                    let (private, coverage) = if zs[2].starts_with("priv.") {
+                        (PrivateStatus::Private, zs[2].chars().skip(5).collect())
+                    } else {
+                        (PrivateStatus::Public, zs[2].to_string())
+                    };
+                    ElasticsearchIndexInfo {
+                        label: i.index.clone(),
+                        place_type: zs[1].to_string(),
+                        coverage: coverage,
+                        private: private,
+                        date: DateTime::<Utc>::from_utc(
+                            NaiveDateTime::new(
+                                NaiveDate::parse_from_str(zs[3], "%Y%m%d")
+                                    .unwrap_or(NaiveDate::from_ymd(1970, 1, 1)),
+                                NaiveTime::parse_from_str(zs[4], "%H%M%S")
+                                    .unwrap_or(NaiveTime::from_hms(0, 1, 1)),
+                            ),
+                            Utc,
+                        ),
+                        count: i.count.parse().unwrap_or(0),
+                        updated_at: Utc::now(),
+                    }
+                })
+                .collect()
+        });
+    let status = if indices.is_some() {
+        ServerStatus::Available
+    } else {
+        ServerStatus::NotAvailable
+    };
+    ElasticsearchInfo {
+        label: info.label,
+        url: info.url,
+        name: info.name,
+        status: status,
+        version: info.version,
+        indices: indices.unwrap_or(Vec::new()),
+        index_prefix: info.index_prefix,
+        updated_at: Utc::now(),
+    }
 }
