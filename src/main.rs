@@ -167,10 +167,10 @@ fn main() {
 
 fn run(env: &str) -> Result<BragiInfo, Error> {
     get_url(env)
-        .and_then(|(env, url)| check_accessible(env, url))
-        .and_then(|(env, url)| check_bragi_status(env, url))
-        .and_then(|bragi| check_elasticsearch_info(bragi))
-        .and_then(|bragi| check_elasticsearch_indices(bragi))
+        .and_then(check_accessible)
+        .and_then(check_bragi_status)
+        .and_then(check_elasticsearch_info)
+        .and_then(check_elasticsearch_indices)
 }
 
 // Return a pair (environment, url)
@@ -194,7 +194,7 @@ fn get_url(env: &str) -> Result<(String, String), Error> {
 
 // Check that the url is accessible (should be done with some kind of 'ping')
 // and return its arguments
-fn check_accessible(env: String, url: String) -> Result<(String, String), Error> {
+fn check_accessible((env, url): (String, String)) -> Result<(String, String), Error> {
     match reqwest::blocking::get(&url) {
         Ok(_) => Ok((env, url)),
         Err(err) => Err(Error::NotAccessible {
@@ -204,7 +204,7 @@ fn check_accessible(env: String, url: String) -> Result<(String, String), Error>
     }
 }
 
-fn check_bragi_status(env: String, url: String) -> Result<BragiInfo, Error> {
+fn check_bragi_status((env, url): (String, String)) -> Result<BragiInfo, Error> {
     let status_url = format!("{}/status", url);
     let resp =
         reqwest::blocking::get(&status_url).context(StatusNotAccessible { url: url.clone() })?;
