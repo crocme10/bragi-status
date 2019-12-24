@@ -1,9 +1,7 @@
 use chrono::prelude::*;
-//use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-// use url::{Host, ParseError, Url};
 use snafu::{ResultExt, Snafu};
+use std::collections::HashMap;
 use url::Url;
 
 #[derive(Debug, Snafu)]
@@ -90,6 +88,33 @@ pub struct ElasticsearchInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct ElasticsearhVersionDetails {
+    pub number: String,
+    #[serde(skip)]
+    pub build_hash: String,
+    #[serde(skip)]
+    pub build_timestamp: String,
+    #[serde(skip)]
+    pub build_snapshot: String,
+    #[serde(skip)]
+    pub lucene_version: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct ElasticsearhInfoDetails {
+    pub name: String,
+    #[serde(skip)]
+    pub cluster_name: String,
+    #[serde(skip)]
+    pub cluster_uuid: String,
+    pub version: ElasticsearhVersionDetails,
+    #[serde(skip)]
+    pub tagline: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct ElasticsearchIndexInfo {
     pub label: String,
@@ -128,28 +153,30 @@ fn is_public(status: &PrivateStatus) -> bool {
 fn main() {
     let arg = std::env::args().skip(1).next();
     let env = arg.unwrap_or(String::from("dev")); // This is the requested environment
-    if let Err(err) = run(&env) {
-        eprintln!("Error: {}", err);
-    }
+    let bragi = run(&env).unwrap_or(BragiInfo {
+        label: String::from(env),
+        url: String::from(""),
+        version: String::from(""),
+        status: BragiStatus::BragiNotAvailable,
+        updated_at: Utc::now(),
+        elastic: None,
+    });
+    let b = serde_json::to_string(&bragi).unwrap();
+    println!("{}", b);
 }
 
-fn run(env: &str) -> Result<(), Error> {
+fn run(env: &str) -> Result<BragiInfo, Error> {
     get_url(env)
         .and_then(|(env, url)| check_accessible(env, url))
         .and_then(|(env, url)| check_bragi_status(env, url))
-        .and_then(|bragi| update_elasticsearch_indices(bragi))
-        .and_then(|bragi| {
-            let b = serde_json::to_string(&bragi).context(DeserializeError)?;
-            println!("{}", b);
-            Ok(())
-        })
+        .and_then(|bragi| check_elasticsearch_info(bragi))
+        .and_then(|bragi| check_elasticsearch_indices(bragi))
 }
 
 // Return a pair (environment, url)
 fn get_url(env: &str) -> Result<(String, String), Error> {
     let info: HashMap<String, String> = [
-        // ("local", "http://localhost:400"),
-        ("local", "http://lemonde.fr"),
+        ("local", "http://localhost:4000"),
         ("dev", "http://bragi-ws.ctp.dev.canaltp.fr"),
         ("internal", "http://bragi-ws.ctp.dev.canaltp.fr"),
         ("prod", "http://vippriv-bragi-ws.mutu.prod.canaltp.prod"),
@@ -184,6 +211,11 @@ fn check_bragi_status(env: String, url: String) -> Result<BragiInfo, Error> {
     let status: BragiStatusDetails = resp
         .json()
         .context(StatusNotReadable { url: url.clone() })?;
+
+    // We brake the URL insto its components, in order to get
+    // the elastic search url, which may or may not include a port number
+    // the name of the index, which is the first element in the path if it is present. If its not
+    // present, we assign a sensible value by default. This could be improved.
     let elastic = Url::parse(&status.elasticsearch).context(ElasticsearchURLNotReadable {
         url: String::from(status.elasticsearch),
     })?;
@@ -198,8 +230,7 @@ fn check_bragi_status(env: String, url: String) -> Result<BragiInfo, Error> {
         ),
     };
 
-    let prefix = String::from(elastic.path_segments().unwrap().next().unwrap_or(""));
-    println!("prefix: {}", prefix);
+    let prefix = String::from(elastic.path_segments().unwrap().next().unwrap_or("munin"));
 
     // We return a bragi info with empty elastic search indices... We delegate filling
     // this information to a later stage.
@@ -222,9 +253,34 @@ fn check_bragi_status(env: String, url: String) -> Result<BragiInfo, Error> {
     })
 }
 
+fn check_elasticsearch_info(info: BragiInfo) -> Result<BragiInfo, Error> {
+    info.elastic
+        .clone()
+        .ok_or(Error::MiscError {
+            msg: String::from("hello"),
+        })
+        .and_then(|es_info| {
+            let details: ElasticsearhInfoDetails = reqwest::blocking::get(&es_info.url)
+                .and_then(|resp| resp.json())
+                .context(StatusNotAccessible {
+                    url: String::from(&es_info.url),
+                })?;
+            // TODO: We're not extracting much information now,
+            // we need to get more...
+            let es_update_info = ElasticsearchInfo {
+                version: details.version.number,
+                ..es_info
+            };
+            Ok(BragiInfo {
+                elastic: Some(es_update_info),
+                ..info
+            })
+        })
+}
+
 // We retrieve all indices in json format, then use serde to deserialize into a data structure,
 // and finally parse the label to extract the information.
-fn update_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error> {
+fn check_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error> {
     info.elastic
         .clone()
         .ok_or(Error::MiscError {
