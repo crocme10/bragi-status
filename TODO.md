@@ -1,0 +1,5 @@
+- Move reqwest to async instead of blocking.
+- Extract more information from elasticsearch.
+- Accept url on command line
+- Use config file which stores known environment
+- Improve error reporting (currently only returns not available)
