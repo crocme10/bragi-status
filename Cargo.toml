@@ -15,3 +15,4 @@ reqwest = { version = "0.10.0-alpha.2", features = ["blocking", "json"] }
 jq-rs = "0.4.1"
 urlencoding = "1.0"
 url = "2.1.0"
+snafu = "0.5"
