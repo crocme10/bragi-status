@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
 use url::Url;
+use futures::future::TryFutureExt;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
@@ -150,10 +151,13 @@ fn is_public(status: &PrivateStatus) -> bool {
     status == &PrivateStatus::Public
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result <(), Error> {
     let arg = std::env::args().skip(1).next();
     let env = arg.unwrap_or(String::from("dev")); // This is the requested environment
-    let bragi = run(&env).unwrap_or(BragiInfo {
+    let bragi = run(&env)
+        .await
+        .unwrap_or(BragiInfo {
         label: String::from(env),
         url: String::from(""),
         version: String::from(""),
@@ -163,18 +167,21 @@ fn main() {
     });
     let b = serde_json::to_string(&bragi).unwrap();
     println!("{}", b);
+    Ok(())
 }
 
-fn run(env: &str) -> Result<BragiInfo, Error> {
+async fn run(env: &str) -> Result<BragiInfo, Error> {
+
     get_url(env)
         .and_then(check_accessible)
         .and_then(check_bragi_status)
         .and_then(check_elasticsearch_info)
         .and_then(check_elasticsearch_indices)
+        .await
 }
 
 // Return a pair (environment, url)
-fn get_url(env: &str) -> Result<(String, String), Error> {
+async fn get_url(env: &str) -> Result<(String, String), Error> {
     let info: HashMap<String, String> = [
         ("local", "http://localhost:4000"),
         ("dev", "http://bragi-ws.ctp.dev.canaltp.fr"),
@@ -194,22 +201,29 @@ fn get_url(env: &str) -> Result<(String, String), Error> {
 
 // Check that the url is accessible (should be done with some kind of 'ping')
 // and return its arguments
-fn check_accessible((env, url): (String, String)) -> Result<(String, String), Error> {
-    match reqwest::blocking::get(&url) {
-        Ok(_) => Ok((env, url)),
-        Err(err) => Err(Error::NotAccessible {
-            url: url,
-            source: err,
-        }),
-    }
+async fn check_accessible((env, url): (String, String)) -> Result<(String, String), Error> {
+    let status = reqwest::get(&url)
+        .await
+        .context(StatusNotAccessible { url: url.clone() })?
+        .status();
+
+    if status.is_client_error() || status.is_server_error() {
+            Err(Error::Environment {
+                env: env.clone()
+            })
+        } else {
+            Ok((env, url))
+        }
 }
 
-fn check_bragi_status((env, url): (String, String)) -> Result<BragiInfo, Error> {
+async fn check_bragi_status((env, url): (String, String)) -> Result<BragiInfo, Error> {
     let status_url = format!("{}/status", url);
-    let resp =
-        reqwest::blocking::get(&status_url).context(StatusNotAccessible { url: url.clone() })?;
-    let status: BragiStatusDetails = resp
+    let status: BragiStatusDetails =
+        reqwest::get(&status_url)
+        .await
+        .context(StatusNotAccessible { url: url.clone() })?
         .json()
+        .await
         .context(StatusNotReadable { url: url.clone() })?;
 
     // We brake the URL insto its components, in order to get
@@ -253,87 +267,84 @@ fn check_bragi_status((env, url): (String, String)) -> Result<BragiInfo, Error> 
     })
 }
 
-fn check_elasticsearch_info(info: BragiInfo) -> Result<BragiInfo, Error> {
-    info.elastic
-        .clone()
-        .ok_or(Error::MiscError {
-            msg: String::from("hello"),
-        })
-        .and_then(|es_info| {
-            let details: ElasticsearhInfoDetails = reqwest::blocking::get(&es_info.url)
-                .and_then(|resp| resp.json())
-                .context(StatusNotAccessible {
-                    url: String::from(&es_info.url),
-                })?;
-            // TODO: We're not extracting much information now,
-            // we need to get more...
-            let es_update_info = ElasticsearchInfo {
-                version: details.version.number,
-                ..es_info
-            };
-            Ok(BragiInfo {
-                elastic: Some(es_update_info),
-                ..info
-            })
-        })
-}
+async fn check_elasticsearch_info(info: BragiInfo) -> Result<BragiInfo, Error> {
+    let es_info = info.elastic .clone() .ok_or(Error::MiscError { msg: String::from("hello")})?;
+    let details: ElasticsearhInfoDetails = reqwest::get(&es_info.url)
+        .await
+        .context(StatusNotAccessible {
+            url: String::from(&es_info.url),
+        })?
+        .json()
+        .await
+        .context(StatusNotAccessible {
+            url: String::from(&es_info.url),
+        })?;
 
+    // TODO: We're not extracting much information now,
+    // we need to get more...
+    let es_update_info = ElasticsearchInfo {
+        version: details.version.number,
+        ..es_info
+    };
+    Ok(BragiInfo {
+        elastic: Some(es_update_info),
+        ..info
+    })
+}
+// 
 // We retrieve all indices in json format, then use serde to deserialize into a data structure,
 // and finally parse the label to extract the information.
-fn check_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error> {
-    info.elastic
-        .clone()
-        .ok_or(Error::MiscError {
-            msg: String::from("hello"),
-        })
-        .map(|es_info| {
-            let indices_url = format!("{}/_cat/indices?format=json", es_info.url);
-            let indices: Option<Vec<ElasticsearchIndexInfo>> = reqwest::blocking::get(&indices_url)
-                .ok()
-                .and_then(|resp| resp.json().ok())
-                .map(|is: Vec<ElasticsearchIndexInfoDetails>| {
-                    is.iter()
-                        .map(|i| {
-                            let zs: Vec<&str> = i.index.split('_').collect();
-                            let (private, coverage) = if zs[2].starts_with("priv.") {
-                                (PrivateStatus::Private, zs[2].chars().skip(5).collect())
-                            } else {
-                                (PrivateStatus::Public, zs[2].to_string())
-                            };
-                            ElasticsearchIndexInfo {
-                                label: i.index.clone(),
-                                place_type: zs[1].to_string(),
-                                coverage: coverage,
-                                private: private,
-                                date: DateTime::<Utc>::from_utc(
-                                    NaiveDateTime::new(
-                                        NaiveDate::parse_from_str(zs[3], "%Y%m%d")
-                                            .unwrap_or(NaiveDate::from_ymd(1970, 1, 1)),
-                                        NaiveTime::parse_from_str(zs[4], "%H%M%S")
-                                            .unwrap_or(NaiveTime::from_hms(0, 1, 1)),
-                                    ),
-                                    Utc,
-                                ),
-                                count: i.count.parse().unwrap_or(0),
-                                updated_at: Utc::now(),
-                            }
-                        })
-                        .collect()
-                });
-            let status = if indices.is_some() {
-                ServerStatus::Available
+async fn check_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error> {
+    let es_info = info.elastic .clone() .ok_or(Error::MiscError { msg: String::from("hello"), })?;
+    let indices_url = format!("{}/_cat/indices?format=json", es_info.url);
+    let indices: Vec<ElasticsearchIndexInfoDetails> = reqwest::get(&indices_url)
+        .await
+        .context(StatusNotAccessible {
+            url: String::from(&es_info.url),
+        })?
+        .json()
+        .await
+        .context(StatusNotAccessible {
+            url: String::from(&es_info.url),
+        })?;
+
+    let indices = indices.iter()
+        .map(|i| {
+            let zs: Vec<&str> = i.index.split('_').collect();
+            let (private, coverage) = if zs[2].starts_with("priv.") {
+                (PrivateStatus::Private, zs[2].chars().skip(5).collect())
             } else {
-                ServerStatus::NotAvailable
+                (PrivateStatus::Public, zs[2].to_string())
             };
-            let es_update_info = ElasticsearchInfo {
-                status: status,
-                indices: indices.unwrap_or(Vec::new()),
-                updated_at: Utc::now(),
-                ..es_info
-            };
-            BragiInfo {
-                elastic: Some(es_update_info),
-                ..info
+            ElasticsearchIndexInfo {
+                label: i.index.clone(),
+                place_type: zs[1].to_string(),
+                coverage: coverage,
+                private: private,
+                date: DateTime::<Utc>::from_utc(
+                          NaiveDateTime::new(
+                              NaiveDate::parse_from_str(zs[3], "%Y%m%d")
+                              .unwrap_or(NaiveDate::from_ymd(1970, 1, 1)),
+                              NaiveTime::parse_from_str(zs[4], "%H%M%S")
+                              .unwrap_or(NaiveTime::from_hms(0, 1, 1)),
+                          ),
+                          Utc,
+                      ),
+                      count: i.count.parse().unwrap_or(0),
+                      updated_at: Utc::now(),
             }
         })
+        .collect();
+
+    let es_update_info = ElasticsearchInfo {
+        status: ServerStatus::Available,
+        indices: indices,
+        updated_at: Utc::now(),
+        ..es_info
+    };
+
+    Ok(BragiInfo {
+        elastic: Some(es_update_info),
+        ..info
+    })
 }
