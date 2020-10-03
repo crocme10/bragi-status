@@ -6,6 +6,9 @@ This program takes an environment name, and return a json output describing the 
 of the corresponding bragi instance. The status includes a description of the underlying
 elasticsearch cluster, and all its indices.
 
+This program is configured using a file, `env.json`, which contains all entry points (read
+elasticsearch backend).
+
 ## Installation
 
 OS X & Linux:
@@ -18,9 +21,36 @@ Windows:
 
 ??
 
+## Configuration
+
+You need to supply a `env.json` file which describes all the entry points. There is a script,
+`env.sh`, which generates the file for you. You need to pass the path to
+a `navitian_deployment_conf` directory. The script will look in the files in that directory for
+entry point, and gather them on stdout. You can redirect the output to `env.json`:
+
+```
+./env.sh [..]/navitian_deployment_conf > env.json
+```
+
+produces the following output (`env.json`):
+
+```
+[
+  {
+    "name": "prod",
+    "url": "http://vippriv-bragi-ws.mutu.prod.canaltp.prod"
+  },
+  {
+    "name": "dev",
+    "url": "http://bragi-ws.ctp.dev.canaltp.fr"
+  },
+  ...
+]
+```
+
 ## Usage example
 
-The following uses [jq](https://stedolan.github.io/jq/) to display the json:
+The following uses [jq](https://stedolan.github.io/jq/) to format and display the json:
 
 ```shell
 cargo run dev | jq '.'

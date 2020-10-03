@@ -1,5 +1,5 @@
 [package]
-name = "bragi_status"
+name = "bragi-status"
 version = "0.1.0"
 authors = ["riendegris <matt@area403.org>"]
 edition = "2018"

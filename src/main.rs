@@ -1,12 +1,21 @@
 use chrono::prelude::*;
+use futures::future::TryFutureExt;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
 use url::Url;
-use futures::future::TryFutureExt;
+
+#[derive(Debug, Deserialize)]
+struct Env {
+    name: String,
+    url: String,
+}
 
 #[derive(Debug, Snafu)]
 pub enum Error {
+    #[snafu(display("Could not read configuration {}", env))]
+    Config { env: String, source: std::io::Error },
+
     #[snafu(display("Could not identify environment {}", env))]
     Environment { env: String },
 
@@ -152,12 +161,10 @@ fn is_public(status: &PrivateStatus) -> bool {
 }
 
 #[tokio::main]
-async fn main() -> Result <(), Error> {
+async fn main() -> Result<(), Error> {
     let arg = std::env::args().skip(1).next();
     let env = arg.unwrap_or(String::from("dev")); // This is the requested environment
-    let bragi = run(&env)
-        .await
-        .unwrap_or(BragiInfo {
+    let bragi = run(&env).await.unwrap_or(BragiInfo {
         label: String::from(env),
         url: String::from(""),
         version: String::from(""),
@@ -171,7 +178,6 @@ async fn main() -> Result <(), Error> {
 }
 
 async fn run(env: &str) -> Result<BragiInfo, Error> {
-
     get_url(env)
         .and_then(check_accessible)
         .and_then(check_bragi_status)
@@ -182,15 +188,16 @@ async fn run(env: &str) -> Result<BragiInfo, Error> {
 
 // Return a pair (environment, url)
 async fn get_url(env: &str) -> Result<(String, String), Error> {
-    let info: HashMap<String, String> = [
-        ("local", "http://localhost:4000"),
-        ("dev", "http://bragi-ws.ctp.dev.canaltp.fr"),
-        ("internal", "http://bragi-ws.ctp.dev.canaltp.fr"),
-        ("prod", "http://vippriv-bragi-ws.mutu.prod.canaltp.prod"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (String::from(k.to_owned()), String::from(v.to_owned())))
-    .collect();
+    let foo = std::fs::read_to_string("env.json").context(Config {
+        env: String::from("env.json"),
+    })?;
+
+    let foos: Vec<Env> = serde_json::from_str(&foo).context(DeserializeError)?;
+
+    let info: HashMap<String, String> = foos
+        .into_iter()
+        .map(|env| (env.name, env.url))
+        .collect::<HashMap<String, String>>();
 
     info.get(env)
         .ok_or(Error::Environment {
@@ -208,25 +215,23 @@ async fn check_accessible((env, url): (String, String)) -> Result<(String, Strin
         .status();
 
     if status.is_client_error() || status.is_server_error() {
-            Err(Error::Environment {
-                env: env.clone()
-            })
-        } else {
-            Ok((env, url))
-        }
+        Err(Error::Environment { env: env.clone() })
+    } else {
+        Ok((env, url))
+    }
 }
 
 async fn check_bragi_status((env, url): (String, String)) -> Result<BragiInfo, Error> {
+    println!("checking {} bragi status", url);
     let status_url = format!("{}/status", url);
-    let status: BragiStatusDetails =
-        reqwest::get(&status_url)
+    let status: BragiStatusDetails = reqwest::get(&status_url)
         .await
         .context(StatusNotAccessible { url: url.clone() })?
         .json()
         .await
         .context(StatusNotReadable { url: url.clone() })?;
 
-    // We brake the URL insto its components, in order to get
+    // We brake the URL into its components, in order to get
     // the elastic search url, which may or may not include a port number
     // the name of the index, which is the first element in the path if it is present. If its not
     // present, we assign a sensible value by default. This could be improved.
@@ -268,7 +273,9 @@ async fn check_bragi_status((env, url): (String, String)) -> Result<BragiInfo, E
 }
 
 async fn check_elasticsearch_info(info: BragiInfo) -> Result<BragiInfo, Error> {
-    let es_info = info.elastic .clone() .ok_or(Error::MiscError { msg: String::from("hello")})?;
+    let es_info = info.elastic.clone().ok_or(Error::MiscError {
+        msg: String::from("hello"),
+    })?;
     let details: ElasticsearhInfoDetails = reqwest::get(&es_info.url)
         .await
         .context(StatusNotAccessible {
@@ -291,11 +298,13 @@ async fn check_elasticsearch_info(info: BragiInfo) -> Result<BragiInfo, Error> {
         ..info
     })
 }
-// 
+//
 // We retrieve all indices in json format, then use serde to deserialize into a data structure,
 // and finally parse the label to extract the information.
 async fn check_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error> {
-    let es_info = info.elastic .clone() .ok_or(Error::MiscError { msg: String::from("hello"), })?;
+    let es_info = info.elastic.clone().ok_or(Error::MiscError {
+        msg: String::from("hello"),
+    })?;
     let indices_url = format!("{}/_cat/indices?format=json", es_info.url);
     let indices: Vec<ElasticsearchIndexInfoDetails> = reqwest::get(&indices_url)
         .await
@@ -308,7 +317,8 @@ async fn check_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error
             url: String::from(&es_info.url),
         })?;
 
-    let indices = indices.iter()
+    let indices = indices
+        .iter()
         .map(|i| {
             let zs: Vec<&str> = i.index.split('_').collect();
             let (private, coverage) = if zs[2].starts_with("priv.") {
@@ -322,16 +332,16 @@ async fn check_elasticsearch_indices(info: BragiInfo) -> Result<BragiInfo, Error
                 coverage: coverage,
                 private: private,
                 date: DateTime::<Utc>::from_utc(
-                          NaiveDateTime::new(
-                              NaiveDate::parse_from_str(zs[3], "%Y%m%d")
-                              .unwrap_or(NaiveDate::from_ymd(1970, 1, 1)),
-                              NaiveTime::parse_from_str(zs[4], "%H%M%S")
-                              .unwrap_or(NaiveTime::from_hms(0, 1, 1)),
-                          ),
-                          Utc,
-                      ),
-                      count: i.count.parse().unwrap_or(0),
-                      updated_at: Utc::now(),
+                    NaiveDateTime::new(
+                        NaiveDate::parse_from_str(zs[3], "%Y%m%d")
+                            .unwrap_or(NaiveDate::from_ymd(1970, 1, 1)),
+                        NaiveTime::parse_from_str(zs[4], "%H%M%S")
+                            .unwrap_or(NaiveTime::from_hms(0, 1, 1)),
+                    ),
+                    Utc,
+                ),
+                count: i.count.parse().unwrap_or(0),
+                updated_at: Utc::now(),
             }
         })
         .collect();
