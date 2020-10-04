@@ -1,18 +1,23 @@
-FROM rust:1.46-stretch as builder
+FROM rust:1.46-buster as builder
 
 RUN USER=root cargo new --lib bragi-status
 WORKDIR ./bragi-status
 COPY ./Cargo.toml ./Cargo.toml
+RUN apt-get update \
+    && apt-get install -y ca-certificates tzdata \
+    && apt-get install -y libjq1 libjq-dev libonig5 libonig-dev \
+    && rm -rf /var/lib/apt/lists/*
+ENV JQ_LIB_DIR=/usr/lib/x86_64-linux-gnu
 
 RUN cargo build --lib --release
 RUN rm src/*.rs
 
 ADD . ./
 
-RUN rm ./target/release/deps/bragi-status*
+RUN rm ./target/release/deps/bragi_status*
 RUN cargo build --release
 
-FROM rust:1.46-stretch
+FROM debian:buster-slim
 ARG APP=/usr/src/app
 
 RUN apt-get update \
@@ -27,9 +32,9 @@ RUN groupadd $APP_USER \
     && useradd -g $APP_USER $APP_USER \
     && mkdir -p ${APP}
 
-COPY --from=builder /ctl2mimir/target/release/service ${APP}/service
-COPY --from=builder /ctl2mimir/config ${APP}/config
-COPY --from=builder /ctl2mimir/docker/entrypoint.sh ${APP}/entrypoint.sh
+COPY --from=builder /bragi-status/target/release/service ${APP}/service
+COPY --from=builder /bragi-status/config ${APP}/config
+COPY --from=builder /bragi-status/docker/entrypoint.sh ${APP}/entrypoint.sh
 
 RUN chown -R $APP_USER:$APP_USER ${APP}
 
