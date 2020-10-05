@@ -2,9 +2,9 @@ debug = true
 mode = "development"
 
 [bragi]
-host = "127.0.0.1"
-port = "5555"
+host = "bragi"
+port = "4000"
 
 [service]
 host = "0.0.0.0"
-port = "5000"
+port = "5001"
