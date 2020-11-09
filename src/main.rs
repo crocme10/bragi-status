@@ -16,6 +16,20 @@ async fn main() -> Result<(), error::Error> {
                 .version("0.1")
                 .author("Matthieu Paindavoine <matt@area403.org>")
                 .arg(
+                    Arg::with_name("config")
+                        .value_name("DIRECTORY")
+                        .short("c")
+                        .long("config")
+                        .help("Config directory"),
+                )
+                .arg(
+                    Arg::with_name("settings")
+                        .value_name("NAME")
+                        .short("s")
+                        .long("settings")
+                        .help("Settings used"),
+                )
+                .arg(
                     Arg::with_name("address")
                         .value_name("HOST")
                         .short("h")
@@ -45,7 +59,6 @@ async fn main() -> Result<(), error::Error> {
 
     match matches.subcommand() {
         ("run", Some(sm)) => server::run(sm, logger).await,
-        // ("test", Some(sm)) => test::test(sm, logger).await,
         _ => {
             warn!(logger, "Unrecognized subcommand");
             Err(error::Error::MiscError {

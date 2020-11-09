@@ -18,27 +18,28 @@ RUN rm ./target/release/deps/bragi_status*
 RUN cargo build --release
 
 FROM debian:buster-slim
-ARG APP=/usr/src/app
 
 RUN apt-get update \
+    && apt-get install -y netcat \
     && apt-get install -y ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Etc/UTC \
-    RUN_MODE=development \
-    APP_USER=appuser
+    APP_USER=appuser \
+    SETTINGS=development
 
 RUN groupadd $APP_USER \
     && useradd -g $APP_USER $APP_USER \
-    && mkdir -p ${APP}
+    && mkdir -p /opt/bragi-status \
+    && mkdir -p /etc/opt/bragi-status
 
-COPY --from=builder /bragi-status/target/release/service ${APP}/service
-COPY --from=builder /bragi-status/config ${APP}/config
-COPY --from=builder /bragi-status/docker/entrypoint.sh ${APP}/entrypoint.sh
+COPY --from=builder /bragi-status/target/release/service /opt/bragi-status/service
+COPY --from=builder /bragi-status/config /etc/opt/bragi-status/config
+COPY --from=builder /bragi-status/docker/entrypoint.sh /opt/bragi-status/entrypoint.sh
 
-RUN chown -R $APP_USER:$APP_USER ${APP}
+RUN chown -R $APP_USER:$APP_USER /opt/bragi-status
 
 USER $APP_USER
-WORKDIR ${APP}
+WORKDIR /opt/bragi-status
 
 CMD ["./entrypoint.sh"]
